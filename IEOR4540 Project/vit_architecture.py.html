@@ -1,0 +1,248 @@
+<html>
+<head>
+<title>vit_architecture.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #000080; font-weight: bold;}
+.s1 { color: #000000;}
+.s2 { color: #0000ff;}
+.s3 { color: #808080; font-style: italic;}
+.s4 { color: #008000; font-weight: bold;}
+</style>
+</head>
+<body bgcolor="#ffffff">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#c0c0c0" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+vit_architecture.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span>torch
+<span class="s0">import </span>torch.nn <span class="s0">as </span>nn
+<span class="s0">from </span>functools <span class="s0">import </span>partial
+<span class="s0">import </span>torch.nn.functional <span class="s0">as </span>F
+<span class="s0">import </span>math
+
+<span class="s0">class </span>PatchEmbedding(nn.Module):
+    <span class="s0">def </span>__init__(self, img_size=<span class="s2">224</span>, patch_size=<span class="s2">16</span>, in_chans=<span class="s2">3</span>, embed_dim=<span class="s2">768</span>):
+        super().__init__()
+        <span class="s3">#image_size=(image_size,image_size)</span>
+        <span class="s3">#patch_size=(patch_size,patch_size)</span>
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.n_patches = (img_size // patch_size) ** <span class="s2">2</span>
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+        self.cls_token = nn.Parameter(torch.randn(<span class="s2">1</span>, <span class="s2">1</span>, embed_dim))
+        self.pos_embedding = nn.Parameter(torch.randn(<span class="s2">1</span>, self.n_patches + <span class="s2">1</span>, embed_dim))
+        self.linear = nn.Linear(embed_dim, <span class="s2">768</span>)
+  
+        norm_layer = partial(nn.LayerNorm, eps=<span class="s2">1e-6</span>)
+        self.norm = norm_layer(embed_dim)
+
+
+    <span class="s0">def </span>forward(self, x):
+        B, _, _, _ = x.shape
+
+        x = self.proj(x) 
+
+        x = x.flatten(<span class="s2">2</span>).transpose(<span class="s2">1</span>, <span class="s2">2</span>) 
+        <span class="s3">#print(&quot;After flatten and transpose shape:&quot;, x.shape)</span>
+        
+        cls_token = self.cls_token.expand(B, -<span class="s2">1</span>, -<span class="s2">1</span>)  
+        x = torch.cat((cls_token, x), dim=<span class="s2">1</span>)  
+        <span class="s3">#print(&quot;After adding cls token shape:&quot;, x.shape)</span>
+
+        x = x + self.pos_embedding 
+        <span class="s3">#print(&quot;After adding positional embedding shape:&quot;, x.shape)</span>
+
+        x = self.linear(x)
+        x = self.norm(x)
+        <span class="s0">return </span>x
+
+
+
+<span class="s0">class </span>MultiHeadAttention(nn.Module):
+    <span class="s3">''' 
+    for general transformer 
+    '''</span>
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads=<span class="s2">12</span>, qkv_bias=<span class="s0">False</span>, atten_drop_ratio=<span class="s2">0.</span>, proj_drop_ratio=<span class="s2">0.</span>):
+        super(MultiHeadAttention, self).__init__()
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.head_dim = embed_dim // num_heads
+        <span class="s0">assert </span>self.head_dim * num_heads == embed_dim, <span class="s4">&quot;embed_dim must be divisible by num_heads&quot;</span>
+
+        self.scale = self.head_dim ** -<span class="s2">0.5</span>
+
+        self.qkv = nn.Linear(embed_dim, embed_dim * <span class="s2">3</span>, bias=qkv_bias)
+        self.atten_drop = nn.Dropout(atten_drop_ratio)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_drop = nn.Dropout(proj_drop_ratio)
+
+    <span class="s0">def </span>forward(self, x, mask=<span class="s0">None</span>):
+        batch_size = x.size(<span class="s2">0</span>)
+        qkv = self.qkv(x).reshape(batch_size, -<span class="s2">1</span>, <span class="s2">3</span>, self.num_heads, self.head_dim).permute(<span class="s2">2</span>, <span class="s2">0</span>, <span class="s2">3</span>, <span class="s2">1</span>, <span class="s2">4</span>)
+        q, k, v = qkv[<span class="s2">0</span>], qkv[<span class="s2">1</span>], qkv[<span class="s2">2</span>]  
+
+        <span class="s3"># Scaled Dot-Product Attention</span>
+        attn = (q @ k.transpose(-<span class="s2">2</span>, -<span class="s2">1</span>)) * self.scale
+        <span class="s0">if </span>mask <span class="s0">is not None</span>:
+            attn = attn.masked_fill(mask == <span class="s2">0</span>, float(<span class="s4">'-inf'</span>))
+        attn = F.softmax(attn, dim=-<span class="s2">1</span>)
+        attn = self.atten_drop(attn)
+
+        weighted_avg = attn @ v  
+        weighted_avg = weighted_avg.transpose(<span class="s2">1</span>, <span class="s2">2</span>).reshape(batch_size, -<span class="s2">1</span>, self.embed_dim)
+
+        x = self.proj(weighted_avg)
+        x = self.proj_drop(x)
+        <span class="s0">return </span>x
+
+
+
+
+<span class="s0">class </span>MLP(nn.Module):
+    <span class="s0">def </span>__init__(self, in_features, hidden_features, out_features=<span class="s0">None</span>, dropout=<span class="s2">0.</span>):
+        super(MLP, self).__init__()
+
+        out_features = out_features <span class="s0">or </span>in_features
+
+        self.norm = nn.LayerNorm(in_features) 
+        self.fc1 = nn.Linear(in_features, hidden_features) 
+        self.act = nn.GELU()  
+        self.drop = nn.Dropout(dropout)  
+        self.fc2 = nn.Linear(hidden_features, out_features)  
+
+    <span class="s0">def </span>forward(self, inputs):
+        x = self.norm(inputs)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+
+        x = self.fc2(x)
+        x = self.drop(x)
+
+        <span class="s0">return </span>x
+
+<span class="s0">class </span>Encoder(nn.Module):
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads, mlp_ratio=<span class="s2">4.</span>, dropout_rate=<span class="s2">0.</span>):
+        super(Encoder, self).__init__()
+
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attention = MultiHeadAttention(embed_dim, num_heads)
+        self.drop1 = nn.Dropout(dropout_rate)
+
+        self.norm2 = nn.LayerNorm(embed_dim)
+        hidden_features = int(embed_dim * mlp_ratio)
+        self.mlp = MLP(embed_dim, hidden_features, dropout=dropout_rate)
+        self.drop2 = nn.Dropout(dropout_rate)
+
+    <span class="s0">def </span>forward(self, x):
+        x = x + self.drop1(self.attention(self.norm1(x)))
+        x = x + self.drop2(self.mlp(self.norm2(x)))
+
+        <span class="s0">return </span>x
+
+
+
+
+<span class="s0">class </span>ViT(nn.Module):
+    <span class="s0">def </span>__init__(self, num_classes=<span class="s2">1000</span>, depth=<span class="s2">12</span>, drop_ratio=<span class="s2">0.</span>, embed_dim=<span class="s2">768</span>, img_size=<span class="s2">224</span>, patch_size=<span class="s2">16</span>,
+                in_chans=<span class="s2">3</span>):
+        super(ViT, self).__init__()
+  
+        self.patchembed = PatchEmbedding(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        self.cls_token = nn.Parameter(torch.zeros(<span class="s2">1</span>, <span class="s2">1</span>, embed_dim))
+
+        self.pos_embed = nn.Parameter(torch.zeros(<span class="s2">1</span>, <span class="s2">1 </span>+ self.patchembed.n_patches, embed_dim))
+        <span class="s3">#print( self.patchembed.n_patches)</span>
+        
+        self.pos_drop = nn.Dropout(drop_ratio)
+
+        self.blocks = nn.Sequential(*[Encoder(embed_dim, num_heads=<span class="s2">12</span>,
+                                            mlp_ratio=<span class="s2">4.</span>, dropout_rate=drop_ratio) <span class="s0">for </span>_ <span class="s0">in </span>range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+        self._init_weights()
+
+    <span class="s0">def </span>_init_weights(self):
+        <span class="s0">for </span>m <span class="s0">in </span>self.modules():
+            <span class="s0">if </span>isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=<span class="s2">0.02</span>)
+                <span class="s0">if </span>m.bias <span class="s0">is not None</span>:
+                    nn.init.zeros_(m.bias)
+            <span class="s0">elif </span>isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    <span class="s0">def </span>forward(self, x):
+        <span class="s3">#print(&quot;Input shape:&quot;, x.shape)</span>
+        x = self.patchembed(x)
+        <span class="s3">#print(&quot;After patch embedding shape:&quot;, x.shape)</span>
+
+        <span class="s3">#cls_tokens = self.cls_token.expand(x.size(0), -1, -1)</span>
+        <span class="s3">#x = torch.cat((cls_tokens, x), dim=1)</span>
+        <span class="s3">#print(&quot;After adding cls token shape:&quot;, x.shape)</span>
+
+        x = x + self.pos_embed
+        <span class="s3">#print(&quot;After adding positional embedding shape:&quot;, x.shape)</span>
+
+        <span class="s3">#x = x + self.pos_embed</span>
+        x = self.pos_drop(x)
+        x = self.blocks(x)
+        x = self.norm(x)
+        x = self.head(x[:, <span class="s2">0</span>])
+        <span class="s3">#print(&quot;Final output shape:&quot;, x.shape)</span>
+
+        <span class="s0">return </span>x
+
+
+
+
+
+
+<span class="s0">if </span>__name__ == <span class="s4">&quot;__main__&quot;</span>:
+    print(<span class="s4">&quot;Test for patch embedding&quot;</span>)
+    model = PatchEmbedding()
+    img = torch.randn(<span class="s2">32</span>, <span class="s2">3</span>, <span class="s2">224</span>, <span class="s2">224</span>)
+    patches = model(img)
+    print(<span class="s4">&quot;&gt;&gt;&gt; Shape of output:&quot;</span>, patches.shape)
+
+    print(<span class="s4">&quot;Test for Multi-Head Attention&quot;</span>)
+    embed_dim = <span class="s2">768</span>
+    num_heads = <span class="s2">12</span>
+    batch_size = <span class="s2">32</span>
+    seq_length = <span class="s2">197</span>
+    test_input = torch.rand(batch_size, seq_length, embed_dim)
+    mha = MultiHeadAttention(embed_dim, num_heads)
+    test_output = mha(test_input)
+    print(<span class="s4">&quot;&gt;&gt;&gt; Output shape:&quot;</span>, test_output.shape)
+
+
+    print(<span class="s4">&quot;Test for MLP&quot;</span>)
+    in_features = <span class="s2">128</span>
+    hidden_features = <span class="s2">768</span>
+    out_features = <span class="s2">128</span>
+    dropout_rate = <span class="s2">0.1</span>
+    batch_size = <span class="s2">32</span>
+    test_input = torch.rand(batch_size, in_features)
+    mlp = MLP(in_features, hidden_features, out_features, dropout_rate)
+    test_output = mlp(test_input)
+    print(<span class="s4">&quot;&gt;&gt;&gt; Output shape:&quot;</span>, test_output.shape)
+
+
+    print(<span class="s4">&quot;Test for Encoder&quot;</span>)
+    embed_dim = <span class="s2">768</span>
+    num_heads = <span class="s2">12</span>
+    mlp_ratio = <span class="s2">4</span>
+    dropout_rate = <span class="s2">0.1</span>
+    batch_size = <span class="s2">32</span>
+    seq_length = <span class="s2">197</span>
+    test_input = torch.rand(batch_size, seq_length, embed_dim)
+    encoder_block = Encoder(embed_dim, num_heads, mlp_ratio, dropout_rate)
+    test_output = encoder_block(test_input)
+    print(<span class="s4">&quot;&gt;&gt;&gt; Output shape:&quot;</span>, test_output.shape)
+</pre>
+</body>
+</html>

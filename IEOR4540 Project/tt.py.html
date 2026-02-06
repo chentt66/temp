@@ -1,0 +1,222 @@
+<html>
+<head>
+<title>tt.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #000080; font-weight: bold;}
+.s1 { color: #000000;}
+.s2 { color: #0000ff;}
+.s3 { color: #008000; font-weight: bold;}
+.s4 { color: #808080; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#ffffff">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#c0c0c0" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tt.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span>torch
+<span class="s0">import </span>os
+<span class="s0">import </span>time
+<span class="s0">import </span>matplotlib.pyplot <span class="s0">as </span>plt
+
+
+<span class="s0">def </span>calculate_accuracy(model, data_loader):
+    correct = <span class="s2">0</span>
+    total = <span class="s2">0</span>
+    <span class="s0">with </span>torch.no_grad():
+        <span class="s0">for </span>data <span class="s0">in </span>data_loader:
+            images, labels = data
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, <span class="s2">1</span>)
+            total += labels.size(<span class="s2">0</span>)
+            correct += (predicted == labels).sum().item()
+    <span class="s0">return </span><span class="s2">100 </span>* correct / total
+
+<span class="s0">def </span>train_model(data, vit_model, num_epochs, criterion, optimizer, checkpoint_read_path, checkpoint_save_path, save_checkpoint=<span class="s0">True</span>, first=<span class="s0">True</span>):
+    device = torch.device(<span class="s3">&quot;cuda&quot; </span><span class="s0">if </span>torch.cuda.is_available() <span class="s0">else </span><span class="s3">&quot;cpu&quot;</span>)
+    print(<span class="s3">f&quot;Using device: </span><span class="s0">{</span>device<span class="s0">}</span><span class="s3">&quot;</span>)
+    vit_model = vit_model.to(device)
+
+    train_losses = []
+    train_speed = []
+    train_accuracy = [] 
+
+    start_epoch = <span class="s2">0</span>
+
+    losses_file = os.path.join(checkpoint_save_path, <span class="s3">'training_losses.txt'</span>)
+    speed_file = os.path.join(checkpoint_save_path, <span class="s3">'training_speed.txt'</span>)
+    accuracy_file = os.path.join(checkpoint_save_path, <span class="s3">'training_accuracy.txt'</span>)  
+
+    <span class="s4"># Check and create files if they don't exist</span>
+    <span class="s0">for </span>file_path <span class="s0">in </span>[losses_file, speed_file, accuracy_file]:  
+        <span class="s0">if not </span>os.path.exists(file_path):
+            <span class="s0">with </span>open(file_path, <span class="s3">'w'</span>) <span class="s0">as </span>file:
+                <span class="s0">pass</span>
+            print(<span class="s3">f&quot;File created: </span><span class="s0">{</span>file_path<span class="s0">}</span><span class="s3">&quot;</span>)
+        <span class="s0">else</span>:
+            print(<span class="s3">f&quot;File already exists: </span><span class="s0">{</span>file_path<span class="s0">}</span><span class="s3">&quot;</span>)
+
+    <span class="s0">if </span>os.path.isdir(checkpoint_read_path):
+        checkpoint_files = [f <span class="s0">for </span>f <span class="s0">in </span>os.listdir(checkpoint_read_path) <span class="s0">if </span>f.endswith(<span class="s3">'.pth'</span>)]
+        <span class="s0">if </span>checkpoint_files:
+            latest_checkpoint_path = os.path.join(checkpoint_read_path, max(checkpoint_files))
+            checkpoint = torch.load(latest_checkpoint_path)
+
+            <span class="s4"># Match and Transfer Compatible Parameters</span>
+            model_state_dict = vit_model.state_dict()
+            <span class="s0">for </span>name, param <span class="s0">in </span>checkpoint[<span class="s3">'state_dict'</span>].items():
+                <span class="s0">if </span>name <span class="s0">in </span>model_state_dict <span class="s0">and </span>param.size() == model_state_dict[name].size():
+                    model_state_dict[name].copy_(param)
+                 
+
+            vit_model.load_state_dict(model_state_dict, strict=<span class="s0">False</span>)
+            <span class="s0">if not </span>first:
+                optimizer.load_state_dict(checkpoint[<span class="s3">'optimizer'</span>])
+            start_epoch = checkpoint[<span class="s3">'epoch'</span>]
+            print(<span class="s3">f&quot;Resuming from checkpoint at epoch </span><span class="s0">{</span>start_epoch<span class="s0">}</span><span class="s3">&quot;</span>)
+
+            <span class="s0">if </span>os.path.exists(losses_file):
+                <span class="s0">with </span>open(losses_file, <span class="s3">'r'</span>) <span class="s0">as </span>file:
+                    train_losses = [float(loss.strip()) <span class="s0">for </span>loss <span class="s0">in </span>file.readlines()]
+
+            <span class="s0">if </span>os.path.exists(speed_file):
+                <span class="s0">with </span>open(speed_file, <span class="s3">'r'</span>) <span class="s0">as </span>file:
+                    train_speed = [float(speed.strip()) <span class="s0">for </span>speed <span class="s0">in </span>file.readlines()]
+
+            <span class="s0">if </span>os.path.exists(accuracy_file):  <span class="s4"># Load previous accuracy data</span>
+                <span class="s0">with </span>open(accuracy_file, <span class="s3">'r'</span>) <span class="s0">as </span>file:
+                    train_accuracy = [float(acc.strip()) <span class="s0">for </span>acc <span class="s0">in </span>file.readlines()]
+
+        <span class="s0">else</span>:
+            print(<span class="s3">&quot;No checkpoint found. Starting training from scratch.&quot;</span>)
+
+    <span class="s4"># Training loop</span>
+    <span class="s0">for </span>epoch <span class="s0">in </span>range(start_epoch, start_epoch + num_epochs):
+        print(<span class="s3">'='</span>*<span class="s2">30</span>) 
+        vit_model.train() 
+        total_train_loss = <span class="s2">0.0</span>
+        correct_predictions = <span class="s2">0</span>
+        total_predictions = <span class="s2">0</span>
+        train_start_time = time.time()
+
+        <span class="s0">for </span>step, (images, labels) <span class="s0">in </span>enumerate(data):
+ 
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = vit_model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            total_train_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, <span class="s2">1</span>)
+            total_predictions += labels.size(<span class="s2">0</span>)
+            correct_predictions += (predicted == labels).sum().item()
+
+            <span class="s0">if </span>step % <span class="s2">100 </span>== <span class="s2">0</span>:
+                print(<span class="s3">f'Step: </span><span class="s0">{</span>step<span class="s0">}</span><span class="s3">, Train Loss: </span><span class="s0">{</span>loss.item()<span class="s0">:</span><span class="s3">.2f</span><span class="s0">}</span><span class="s3">'</span>)
+
+        train_duration = time.time() - train_start_time
+        train_loss = total_train_loss / len(data)
+        epoch_accuracy = (correct_predictions / total_predictions) * <span class="s2">100  </span>
+        train_losses.append(train_loss)
+        train_speed.append(train_duration)
+        train_accuracy.append(epoch_accuracy)  
+
+
+        <span class="s0">with </span>open(losses_file, <span class="s3">'w'</span>) <span class="s0">as </span>file:
+            <span class="s0">for </span>loss <span class="s0">in </span>train_losses:
+                file.write(<span class="s3">f&quot;</span><span class="s0">{</span>loss<span class="s0">}\n</span><span class="s3">&quot;</span>)
+
+        <span class="s0">with </span>open(speed_file, <span class="s3">'w'</span>) <span class="s0">as </span>file:
+            <span class="s0">for </span>speed <span class="s0">in </span>train_speed:
+                file.write(<span class="s3">f&quot;</span><span class="s0">{</span>speed<span class="s0">}\n</span><span class="s3">&quot;</span>)
+
+        <span class="s0">with </span>open(accuracy_file, <span class="s3">'w'</span>) <span class="s0">as </span>file:  <span class="s4"># Save accuracy data</span>
+            <span class="s0">for </span>acc <span class="s0">in </span>train_accuracy:
+                file.write(<span class="s3">f&quot;</span><span class="s0">{</span>acc<span class="s0">}\n</span><span class="s3">&quot;</span>)
+
+        print(<span class="s3">'-'</span>*<span class="s2">30</span>)
+        print(<span class="s3">f'Epoch: </span><span class="s0">{</span>epoch + <span class="s2">1</span><span class="s0">}</span><span class="s3">/</span><span class="s0">{</span>num_epochs+start_epoch<span class="s0">}</span><span class="s3">, '</span>
+              <span class="s3">f'Train Loss: </span><span class="s0">{</span>train_loss<span class="s0">:</span><span class="s3">.2f</span><span class="s0">}</span><span class="s3">, '</span>
+              <span class="s3">f'Train Accuracy: </span><span class="s0">{</span>epoch_accuracy<span class="s0">:</span><span class="s3">.2f</span><span class="s0">}</span><span class="s3">%, '</span>
+              <span class="s3">f'Train Duration: </span><span class="s0">{</span>train_duration<span class="s0">:</span><span class="s3">.2f</span><span class="s0">} </span><span class="s3">sec'</span>)
+
+    <span class="s0">if </span>save_checkpoint:
+        final_checkpoint = {
+            <span class="s3">'epoch'</span>: start_epoch + num_epochs,
+            <span class="s3">'state_dict'</span>: vit_model.state_dict(),
+            <span class="s3">'optimizer'</span>: optimizer.state_dict(),
+        }
+        checkpoint_filename = os.path.join(checkpoint_save_path, <span class="s3">f'checkpoint_epoch_</span><span class="s0">{</span>start_epoch + num_epochs<span class="s0">}</span><span class="s3">.pth'</span>)
+        torch.save(final_checkpoint, checkpoint_filename)
+        print(<span class="s3">f'Final checkpoint saved at </span><span class="s0">{</span>checkpoint_filename<span class="s0">}</span><span class="s3">'</span>)
+
+    <span class="s0">return </span>train_losses, train_speed, train_accuracy, start_epoch
+
+
+<span class="s0">import </span>torch
+
+<span class="s0">def </span>evaluate_model(model, data_loader, criterion, device):
+    device = torch.device(<span class="s3">&quot;cuda&quot; </span><span class="s0">if </span>torch.cuda.is_available() <span class="s0">else </span><span class="s3">&quot;cpu&quot;</span>)
+    print(<span class="s3">f&quot;Using device: </span><span class="s0">{</span>device<span class="s0">}</span><span class="s3">&quot;</span>)
+
+    model.eval()
+    model.to(device)
+
+    total_loss = <span class="s2">0.0</span>
+    correct = <span class="s2">0</span>
+    total = <span class="s2">0</span>
+    all_preds = []
+    all_labels = []
+    start_time = time.time()
+
+    <span class="s0">with </span>torch.no_grad():
+        <span class="s0">for </span>data <span class="s0">in </span>data_loader:
+            inputs, labels = data
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            total_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, <span class="s2">1</span>)
+            total += labels.size(<span class="s2">0</span>)
+            correct += (predicted == labels).sum().item()
+
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    avg_loss = total_loss / len(data_loader)
+    accuracy = <span class="s2">100 </span>* correct / total
+    duration = time.time()-start_time
+
+    <span class="s0">return </span>avg_loss, accuracy, all_preds, all_labels,duration
+
+
+<span class="s0">def </span>denormalize(tensor, mean, std):
+    mean = mean.unsqueeze(<span class="s2">1</span>).unsqueeze(<span class="s2">1</span>)
+    std = std.unsqueeze(<span class="s2">1</span>).unsqueeze(<span class="s2">1</span>)
+
+    tensor = tensor.clone()
+    tensor.mul_(std).add_(mean)
+    tensor = torch.clamp(tensor, <span class="s2">0</span>, <span class="s2">1</span>)
+    <span class="s0">return </span>tensor
+
+
+<span class="s0">def </span>plot_images(images, labels, preds, probs, mean, std):
+    plt.figure(figsize=(<span class="s2">15</span>, <span class="s2">12</span>))
+    classes = (<span class="s3">'plane'</span>, <span class="s3">'car'</span>, <span class="s3">'bird'</span>, <span class="s3">'cat'</span>, <span class="s3">'deer'</span>, <span class="s3">'dog'</span>, <span class="s3">'frog'</span>, <span class="s3">'horse'</span>, <span class="s3">'ship'</span>, <span class="s3">'truck'</span>)
+    <span class="s0">for </span>i <span class="s0">in </span>range(<span class="s2">12</span>):
+        plt.subplot(<span class="s2">3</span>, <span class="s2">4</span>, i+<span class="s2">1</span>)
+        img = denormalize(images[i], mean, std).permute(<span class="s2">1</span>, <span class="s2">2</span>, <span class="s2">0</span>)  <span class="s4"># Convert from (C, H, W) to (H, W, C)</span>
+        plt.imshow(img)
+        plt.title(<span class="s3">f'True: </span><span class="s0">{</span>classes[labels[i]]<span class="s0">}\n</span><span class="s3">Predicted: </span><span class="s0">{</span>classes[preds[i]]<span class="s0">}\n</span><span class="s3">Prob: </span><span class="s0">{</span>probs[i]<span class="s0">:</span><span class="s3">.2f</span><span class="s0">}</span><span class="s3">'</span>)
+        plt.axis(<span class="s3">'off'</span>)
+    plt.show()
+</pre>
+</body>
+</html>

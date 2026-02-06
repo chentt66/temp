@@ -1,0 +1,241 @@
+<html>
+<head>
+<title>performer_architecture.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #000080; font-weight: bold;}
+.s1 { color: #000000;}
+.s2 { color: #0000ff;}
+.s3 { color: #808080; font-style: italic;}
+.s4 { color: #008000; font-weight: bold;}
+</style>
+</head>
+<body bgcolor="#ffffff">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#c0c0c0" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+performer_architecture.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span>torch
+<span class="s0">import </span>torch.nn <span class="s0">as </span>nn
+<span class="s0">import </span>torch.nn.functional <span class="s0">as </span>F
+<span class="s0">import </span>math
+<span class="s0">from </span>vit_architecture <span class="s0">import </span>*
+
+
+<span class="s0">class </span>DropPath(nn.Module):
+    <span class="s0">def </span>__init__(self, drop_prob=<span class="s0">None</span>):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    <span class="s0">def </span>forward(self, x):
+        <span class="s0">if </span>self.drop_prob == <span class="s2">0. </span><span class="s0">or not </span>self.training:
+            <span class="s0">return </span>x
+        keep_prob = <span class="s2">1 </span>- self.drop_prob
+        shape = (x.shape[<span class="s2">0</span>],) + (<span class="s2">1</span>,) * (x.ndim - <span class="s2">1</span>)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()  <span class="s3"># binarize</span>
+        output = x.div(keep_prob) * random_tensor
+        <span class="s0">return </span>output
+
+
+<span class="s3"># Variant: positive random features (run ablations over various numbers of RFs)</span>
+<span class="s0">class </span>FAVORAttention(nn.Module):
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads=<span class="s2">12</span>, qkv_bias=<span class="s0">False</span>, atten_drop_ratio=<span class="s2">0.</span>, proj_drop_ratio=<span class="s2">0.</span>, nb_features=<span class="s0">None</span>):
+        super(FAVORAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -<span class="s2">0.5</span>
+
+        self.qkv = nn.Linear(embed_dim, embed_dim * <span class="s2">3</span>, bias=qkv_bias)
+        self.atten_drop = nn.Dropout(atten_drop_ratio)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_drop = nn.Dropout(proj_drop_ratio)
+
+        self.nb_features = nb_features <span class="s0">or </span>(<span class="s2">2 </span>* num_heads)
+        self.ortho_random_feature = nn.Parameter(torch.randn(self.nb_features, self.head_dim), requires_grad=<span class="s0">False</span>)
+
+    <span class="s0">def </span>forward(self, x):
+        B, N, _ = x.shape
+        qkv = self.qkv(x).reshape(B, N, <span class="s2">3</span>, self.num_heads, self.head_dim).permute(<span class="s2">2</span>, <span class="s2">0</span>, <span class="s2">3</span>, <span class="s2">1</span>, <span class="s2">4</span>)
+        q, k, v = qkv.unbind(<span class="s2">0</span>)
+
+        q = q * self.scale
+        k = F.normalize(k, dim=-<span class="s2">1</span>)
+        v = F.normalize(v, dim=-<span class="s2">1</span>)
+
+        q = q @ self.ortho_random_feature.T
+        k = k @ self.ortho_random_feature.T
+
+        q = F.softmax(q, dim=-<span class="s2">1</span>)
+        k = F.softmax(k, dim=-<span class="s2">1</span>)
+
+        kv = torch.einsum(<span class="s4">'bnhd,bnhe-&gt;bhde'</span>, k, v)
+        qkv = torch.einsum(<span class="s4">'bhde,bnhd-&gt;bnhe'</span>, kv, q)
+
+        qkv = qkv.reshape(B, N, -<span class="s2">1</span>)
+        x = self.proj(qkv)
+        x = self.proj_drop(x)
+
+        <span class="s0">return </span>x
+
+    <span class="s0">def </span>random_feature_map(self, x):
+        <span class="s3"># Ensure omega is broadcastable over batch and heads</span>
+        omega = self.omega.unsqueeze(<span class="s2">0</span>).unsqueeze(<span class="s2">0</span>)  
+
+        x_norm = torch.norm(x, dim=-<span class="s2">1</span>, keepdim=<span class="s0">True</span>)  
+        scaling_factor = torch.exp(-x_norm ** <span class="s2">2 </span>/ <span class="s2">2</span>)  
+
+       
+        <span class="s3"># x has shape [B, num_heads, N, head_dim], omega has shape [1, 1, nb_features, head_dim]</span>
+        f1 = torch.exp(torch.einsum(<span class="s4">'bhnd,ond-&gt;bhno'</span>, x, omega))
+        f2 = torch.exp(-torch.einsum(<span class="s4">'bhnd,ond-&gt;bhno'</span>, x, omega))
+
+        phi_x = scaling_factor * (f1 + f2) / math.sqrt(self.nb_features)
+        <span class="s0">return </span>phi_x
+
+
+
+
+<span class="s3"># Variant: Apply a deterministic mechanism with ReLU  nonlinearities</span>
+<span class="s0">class </span>ReLUMapAttention(nn.Module):
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads=<span class="s2">12</span>, qkv_bias=<span class="s0">False</span>, atten_drop_ratio=<span class="s2">0.</span>, proj_drop_ratio=<span class="s2">0.</span>):
+        super(ReLUMapAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -<span class="s2">0.5</span>
+
+        self.qkv = nn.Linear(embed_dim, embed_dim * <span class="s2">3</span>, bias=qkv_bias)
+        self.atten_drop = nn.Dropout(atten_drop_ratio)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_drop = nn.Dropout(proj_drop_ratio)
+
+    <span class="s0">def </span>forward(self, x):
+        B, N, _ = x.shape
+        qkv = self.qkv(x).reshape(B, N, <span class="s2">3</span>, self.num_heads, self.head_dim).permute(<span class="s2">2</span>, <span class="s2">0</span>, <span class="s2">3</span>, <span class="s2">1</span>, <span class="s2">4</span>)
+        q, k, v = qkv.unbind(<span class="s2">0</span>)
+
+        <span class="s3"># Apply deterministic transformations (ReLU)</span>
+        q = self.deterministic_feature_map(q)
+        k = self.deterministic_feature_map(k)
+
+        attn = torch.einsum(<span class="s4">'bnhd,bmhd-&gt;bhnm'</span>, q, k)
+        out = torch.einsum(<span class="s4">'bhnm,bmhd-&gt;bnhd'</span>, attn, v)
+
+        out = out.reshape(B, N, -<span class="s2">1</span>)
+        x = self.proj(out)
+        x = self.proj_drop(x)
+
+        <span class="s0">return </span>x
+
+    <span class="s0">def </span>deterministic_feature_map(self, x):
+        <span class="s0">return </span>F.relu(x)
+
+
+<span class="s3"># Variant: Apply a deterministic mechanism with EXP nonlinearities</span>
+<span class="s0">class </span>ExpMapAttention(nn.Module):
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads=<span class="s2">12</span>, qkv_bias=<span class="s0">False</span>, atten_drop_ratio=<span class="s2">0.</span>, proj_drop_ratio=<span class="s2">0.</span>):
+        super(ExpMapAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -<span class="s2">0.5</span>
+
+        self.qkv = nn.Linear(embed_dim, embed_dim * <span class="s2">3</span>, bias=qkv_bias)
+        self.atten_drop = nn.Dropout(atten_drop_ratio)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        self.proj_drop = nn.Dropout(proj_drop_ratio)
+
+    <span class="s0">def </span>forward(self, x):
+        B, N, _ = x.shape
+        qkv = self.qkv(x).reshape(B, N, <span class="s2">3</span>, self.num_heads, self.head_dim).permute(<span class="s2">2</span>, <span class="s2">0</span>, <span class="s2">3</span>, <span class="s2">1</span>, <span class="s2">4</span>)
+        q, k, v = qkv.unbind(<span class="s2">0</span>)
+
+        q = self.deterministic_feature_map(q)
+        k = self.deterministic_feature_map(k)
+
+        attn = torch.einsum(<span class="s4">'bnhd,bmhd-&gt;bhnm'</span>, q, k)
+        out = torch.einsum(<span class="s4">'bhnm,bmhd-&gt;bnhd'</span>, attn, v)
+
+        out = out.reshape(B, N, -<span class="s2">1</span>)
+        x = self.proj(out)
+        x = self.proj_drop(x)
+        <span class="s0">return </span>x
+
+    <span class="s0">def </span>deterministic_feature_map(self, x):
+        scaled_x = x * self.scale  
+        <span class="s0">return </span>torch.exp(scaled_x)  
+
+
+
+
+<span class="s0">class </span>PerformerEncoder(nn.Module):
+    <span class="s0">def </span>__init__(self, embed_dim, num_heads,
+                mlp_ratio=<span class="s2">4.</span>, qkv_bias=<span class="s0">False</span>, atten_drop_ratio=<span class="s2">0.</span>, dropout_ratio=<span class="s2">0.</span>, drop_path_ratio=<span class="s2">0.</span>,
+                variant=<span class="s4">&quot;a&quot;</span>):
+        
+        super().__init__()
+
+        self.norm1 = nn.LayerNorm(embed_dim)
+        <span class="s0">if </span>variant==<span class="s4">&quot;a&quot;</span>:
+            PerformerAttention= FAVORAttention
+        <span class="s0">elif </span>variant == <span class="s4">&quot;relu&quot;</span>:
+            PerformerAttention = ReLUMapAttention
+        <span class="s0">else</span>:
+            PerformerAttention = ExpMapAttention
+        self.attn = PerformerAttention(embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, atten_drop_ratio=atten_drop_ratio)
+        self.drop_path = DropPath(drop_path_ratio) <span class="s0">if </span>drop_path_ratio &gt; <span class="s2">0. </span><span class="s0">else </span>nn.Identity()
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+        <span class="s3"># Ensure to match the MLP instantiation with the class definition</span>
+        mlp_hidden_dim = int(embed_dim * mlp_ratio)
+        self.mlp = MLP(in_features=embed_dim, hidden_features=mlp_hidden_dim, out_features=embed_dim, dropout=dropout_ratio)
+
+    <span class="s0">def </span>forward(self, x):
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        <span class="s0">return </span>x
+
+
+
+<span class="s0">class </span>PerformerModel(nn.Module):
+    <span class="s0">def </span>__init__(self, img_size=<span class="s2">32</span>, patch_size=<span class="s2">4</span>, in_chans=<span class="s2">3</span>, num_classes=<span class="s2">10</span>, embed_dim=<span class="s2">768</span>, depth=<span class="s2">12</span>, num_heads=<span class="s2">12</span>, mlp_ratio=<span class="s2">4.</span>, qkv_bias=<span class="s0">False</span>, 
+                 atten_drop_ratio=<span class="s2">0.</span>, drop_ratio=<span class="s2">0.</span>, drop_path_ratio=<span class="s2">0.</span>,
+                 variant=<span class="s4">&quot;random&quot;</span>):
+        super().__init__()
+        self.patch_embed = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        num_patches = (img_size // patch_size) ** <span class="s2">2</span>
+
+        self.cls_token = nn.Parameter(torch.zeros(<span class="s2">1</span>, <span class="s2">1</span>, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(<span class="s2">1</span>, <span class="s2">1 </span>+ num_patches, embed_dim))
+        self.pos_drop = nn.Dropout(p=drop_ratio)
+
+        self.blocks = nn.ModuleList([
+            PerformerEncoder(embed_dim, num_heads, mlp_ratio, qkv_bias, atten_drop_ratio, drop_ratio, drop_path_ratio, variant)
+            <span class="s0">for </span>_ <span class="s0">in </span>range(depth)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    <span class="s0">def </span>forward(self, x):
+        B = x.shape[<span class="s2">0</span>]
+        x = self.patch_embed(x)
+        x = x.flatten(<span class="s2">2</span>).transpose(<span class="s2">1</span>, <span class="s2">2</span>)
+
+        cls_tokens = self.cls_token.expand(B, -<span class="s2">1</span>, -<span class="s2">1</span>)
+        x = torch.cat((cls_tokens, x), dim=<span class="s2">1</span>)
+        x += self.pos_embed
+        x = self.pos_drop(x)
+
+        <span class="s0">for </span>block <span class="s0">in </span>self.blocks:
+            x = block(x)
+
+        x = self.norm(x)
+        cls_token_final = x[:, <span class="s2">0</span>]
+        x = self.head(cls_token_final)
+
+        <span class="s0">return </span>x</pre>
+</body>
+</html>
